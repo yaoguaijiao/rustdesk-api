@@ -24,13 +24,18 @@ on:
         required: false
         default: 'false'
       WEBCLIENT_SOURCE_LOCATION:
-        description: 'Web Client API Repository'
+        description: 'Admin frontend GitHub repository URL or owner/repository'
         required: true
-        default: 'https://github.com/lejianwen/rustdesk-api-web'
+        default: 'https://github.com/yaoguaijiao/rustdesk-api-web'
+      WEBCLIENT_SOURCE_REF:
+        description: 'Admin frontend commit, tag or branch (default: pinned fork commit)'
+        required: true
+        default: '3998c2a9213fcd047252776d0f0db33e6717026c'
 
 env:
   LATEST_TAG: latest
-  WEBCLIENT_SOURCE_LOCATION: ${{ github.event.inputs.WEBCLIENT_SOURCE_LOCATION || 'https://github.com/lejianwen/rustdesk-api-web' }}
+  WEBCLIENT_SOURCE_LOCATION: ${{ github.event.inputs.WEBCLIENT_SOURCE_LOCATION || 'https://github.com/yaoguaijiao/rustdesk-api-web' }}
+  WEBCLIENT_SOURCE_REF: ${{ github.event.inputs.WEBCLIENT_SOURCE_REF || '3998c2a9213fcd047252776d0f0db33e6717026c' }}
   BASE_IMAGE_NAMESPACE: ${{ github.event.inputs.BASE_IMAGE_NAMESPACE || github.actor }}
   DOCKERHUB_IMAGE_NAMESPACE: ${{ github.event.inputs.DOCKERHUB_IMAGE_NAMESPACE || github.actor }}
   GHCR_IMAGE_NAMESPACE: ${{ github.event.inputs.GHCR_IMAGE_NAMESPACE || github.actor }}
@@ -52,11 +57,26 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - uses: actions/checkout@v4
+      - name: Resolve admin frontend repository
+        id: frontend
+        shell: bash
+        run: |
+          repository="${WEBCLIENT_SOURCE_LOCATION%/}"
+          repository="${repository#https://github.com/}"
+          repository="${repository#http://github.com/}"
+          repository="${repository%.git}"
+          if [[ ! "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo '::error::WEBCLIENT_SOURCE_LOCATION must be a GitHub URL or owner/repository'
+            exit 1
+          fi
+          printf 'repository=%s\n' "$repository" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned admin frontend
+        uses: actions/checkout@v4
         with:
-          repository: lejianwen/rustdesk-api-web
+          repository: ${{ steps.frontend.outputs.repository }}
           path: rustdesk-api-web
-          ref: master
+          ref: ${{ env.WEBCLIENT_SOURCE_REF }}
 
       - name: Set up Go environment
         uses: actions/setup-go@v4
