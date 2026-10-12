@@ -143,6 +143,12 @@ jobs:
             exit 1
           fi
           docker exec migration-smoke /usr/bin/healthcheck.sh
+          # s6-svstat 查询成功不代表服务正在运行，逐个核对三个服务。
+          for service in hbbs hbbr api; do
+            test "$(docker exec migration-smoke /command/s6-svstat -u "/run/service/$service")" = true
+          done
+          version="$(docker exec migration-smoke wget -q -T 3 -O - http://127.0.0.1:21114/api/version)"
+          [[ "$version" == *"migration-${GITHUB_SHA:0:12}"* ]]
           docker stop --time 10 migration-smoke
           docker rm -v migration-smoke
 
