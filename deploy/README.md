@@ -2,6 +2,8 @@
 
 首版[私有发布验证已通过](https://github.com/yaoguaijiao/rustdesk-deploy/actions/runs/38441493511)：包为 Private，匿名拉取被拒绝，Docker/Podman 授权拉取及隔离启动通过。固定 digest 为 `sha256:858f8d374c8e72d2cfb41cea6a47999e90db50a675a5e9730f46ff28039528cc`；完整发布记录保存在私有仓库的 `release-v2026.10.14.1.json`。生产服务不会随发布自动切换。
 
+[Podman 副本演练](https://github.com/yaoguaijiao/rustdesk-deploy/actions/runs/38444851581/job/115460452904)和 [Docker 副本演练](https://github.com/yaoguaijiao/rustdesk-deploy/actions/runs/38445280285/job/115461923830)均通过：原密钥和数据记录保留、同镜像不重启、停止容器可回退、升级后的新增数据在回退后仍在，以及坏配置触发自动退回。演练使用 CI 临时数据，不接触生产。
+
 私有发布目标为 `ghcr.io/yaoguaijiao/rustdesk-server-s6-private:v2026.10.14.1`，供本人及明确获授权的账户使用，包必须保持 **Private**。适用 `linux/amd64`，一个 S6 容器包含 hbbs、hbbr、Go API 和 Vue 管理前端。镜像只包含程序，不包含生产数据库、密钥或账号；具体可用版本和 digest 以私有发布 Actions 的成功结果为准。
 
 使用已有的 Podman + **podman-compose 1.5 或更新版本**，或 Docker Engine + Docker Compose。123 服务器现有 podman-compose 为 1.5；升级工具使用的 Compose stdin 方式已在该版本核对。工具只需要 Linux Python 3.9+ 标准库，不需要在部署机器安装项目依赖或编译源码。以下命令在部署机器的私有 Bash 终端、此 `deploy` 目录中执行；一次部署只选择一种容器引擎。
