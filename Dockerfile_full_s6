@@ -1,4 +1,7 @@
-FROM rustdesk/rustdesk-server-s6:latest AS server
+# Required: an already published server-s6 image built from your own server fork.
+# Use a fixed tag or digest; build the server image with the plain API image first.
+ARG FULL_S6_SERVER_IMAGE
+FROM ${FULL_S6_SERVER_IMAGE} AS server
 
 FROM alpine
 

@@ -1,0 +1,48 @@
+services:
+  rustdesk:
+    image: "${RUSTDESK_IMAGE:-ghcr.io/yaoguaijiao/rustdesk-server-s6:v2026.10.14.1}"
+    platform: linux/amd64
+    container_name: rustdesk-server
+    restart: unless-stopped
+    ports:
+      - "21114:21114/tcp"
+      - "21115:21115/tcp"
+      - "21116:21116/tcp"
+      - "21116:21116/udp"
+      - "21117:21117/tcp"
+      - "21118:21118/tcp"
+      - "21119:21119/tcp"
+    environment:
+      TZ: Asia/Shanghai
+      RELAY: "${PUB_HOST:?请在.env填写PUB_HOST}:21117"
+      ENCRYPTED_ONLY: "1"
+      MUST_LOGIN: "N"
+      RUSTDESK_API_LANG: zh-CN
+      RUSTDESK_API_GORM_TYPE: sqlite
+      RUSTDESK_API_RUSTDESK_ID_SERVER: "${PUB_HOST:?请在.env填写PUB_HOST}:21116"
+      RUSTDESK_API_RUSTDESK_RELAY_SERVER: "${PUB_HOST:?请在.env填写PUB_HOST}:21117"
+      RUSTDESK_API_RUSTDESK_API_SERVER: "${PUBLIC_API_URL:?请在.env填写完整PUBLIC_API_URL}"
+      RUSTDESK_API_RUSTDESK_KEY_FILE: /data/id_ed25519.pub
+      RUSTDESK_API_JWT_KEY: ""
+    volumes:
+      # 升级已有节点时必须指定原目录；:Z 会调整专用目录的 SELinux 标签。
+      - "${SERVER_DATA_DIR:-./server_data}:/data:Z"
+      - "${API_DATA_DIR:-./api_data}:/app/data:Z"
+    networks:
+      - rustdesk-net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          test "$$(/command/s6-svstat -u /run/service/hbbs)" = true &&
+          test "$$(/command/s6-svstat -u /run/service/hbbr)" = true &&
+          test "$$(/command/s6-svstat -u /run/service/api)" = true &&
+          wget -q -T 3 -O /dev/null http://127.0.0.1:21114/api/version
+      interval: 10s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
+
+networks:
+  rustdesk-net:
+    driver: bridge

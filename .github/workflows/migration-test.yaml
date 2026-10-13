@@ -1,0 +1,175 @@
+name: Build migration test image
+
+# 依赖安装、编译和镜像导出仅在临时 GitHub runner 中执行，产物保留 3 天。
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/migration-test.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout API source
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned frontend
+        uses: actions/checkout@v4
+        with:
+          repository: yaoguaijiao/rustdesk-api-web
+          ref: 3998c2a9213fcd047252776d0f0db33e6717026c
+          path: rustdesk-api-web
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        working-directory: rustdesk-api-web
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+          npm run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.10'
+          cache: false
+
+      - name: Install musl compiler in CI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Build static API and prepare image files
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: '1'
+          CC: musl-gcc
+        run: |
+          mkdir -p amd64/release/data amd64/release/runtime
+          cp -a resources conf docs amd64/release/
+          mkdir -p amd64/release/resources/admin
+          cp -a rustdesk-api-web/dist/. amd64/release/resources/admin/
+          printf 'migration-%s\n' "${GITHUB_SHA:0:12}" > amd64/release/resources/version
+          go build -mod=mod -trimpath -ldflags '-s -w -linkmode external -extldflags -static' -o amd64/release/apimain ./cmd/apimain.go
+          file amd64/release/apimain
+          if readelf -l amd64/release/apimain | grep -q INTERP; then
+            echo '::error::API binary still requires a dynamic loader'
+            exit 1
+          fi
+
+      - name: Build local API image
+        run: |
+          image="localhost/rustdesk-api:migration-${GITHUB_SHA:0:12}"
+          # 仅把 amd64/release 作为构建上下文，避免传输前端 node_modules。
+          docker build --platform linux/amd64 --build-arg BUILDARCH=. \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=migration-${GITHUB_SHA:0:12}" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --tag "$image" --file Dockerfile amd64
+          printf 'API_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+
+      - name: Checkout pinned server
+        uses: actions/checkout@v4
+        with:
+          repository: yaoguaijiao/rustdesk-server
+          ref: 0784a2014e9a6ad4138198f681cccd51eecf0183
+          path: server
+          submodules: recursive
+
+      - name: Build static server binaries in CI
+        working-directory: server
+        env:
+          MUSL_BUILDER: ghcr.io/rust-cross/rust-musl-cross@sha256:fb7229c2a7dd84957e3a46f8bec7d01c4ec7c295ad159606623093a0a9286253
+        run: |
+          # 只在 CI 下载编译环境和依赖；用户电脑及生产服务器不参与编译。
+          docker run --rm --platform linux/amd64 \
+            -e CARGO_BUILD_JOBS=2 \
+            -v "$PWD:/home/rust/src" -w /home/rust/src \
+            "$MUSL_BUILDER" \
+            cargo build --release --locked --bins --target=x86_64-unknown-linux-musl
+          for binary in hbbs hbbr rustdesk-utils; do
+            file "target/x86_64-unknown-linux-musl/release/$binary"
+            if readelf -l "target/x86_64-unknown-linux-musl/release/$binary" | grep -q INTERP; then
+              echo "::error::$binary still requires a dynamic loader"
+              exit 1
+            fi
+            install -m 0755 "target/x86_64-unknown-linux-musl/release/$binary" "docker/rootfs/usr/bin/$binary"
+          done
+
+      - name: Build combined S6 test image
+        run: |
+          image="localhost/rustdesk-server-s6:migration-${GITHUB_SHA:0:12}"
+          server_sha="$(git -C server rev-parse HEAD)"
+          docker build --platform linux/amd64 \
+            --build-arg "API_IMAGE=$API_IMAGE" --build-arg S6_ARCH=x86_64 \
+            --label "org.opencontainers.image.revision=$server_sha" \
+            --label "org.opencontainers.image.source=https://github.com/yaoguaijiao/rustdesk-server" \
+            --label "org.opencontainers.image.version=migration-${GITHUB_SHA:0:12}" \
+            --label "io.rustdesk.api.revision=$GITHUB_SHA" \
+            --label "io.rustdesk.frontend.revision=3998c2a9213fcd047252776d0f0db33e6717026c" \
+            --tag "$image" --file server/docker/Dockerfile server/docker
+          printf 'SERVER_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+
+      - name: Check isolated container startup
+        run: |
+          # 无端口发布、无外部网络；只在 CI 的临时数据卷验证首次启动。
+          docker run -d --name migration-smoke --network none --memory 384m \
+            -e RELAY=127.0.0.1:21117 -e ENCRYPTED_ONLY=1 "$SERVER_IMAGE"
+          ready=false
+          for attempt in $(seq 1 30); do
+            state="$(docker inspect --format '{{.State.Health.Status}}' migration-smoke)"
+            if [ "$state" = healthy ]; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then
+            docker inspect --format '{{json .State}}' migration-smoke
+            echo '::error::Isolated S6 startup did not become healthy'
+            exit 1
+          fi
+          docker exec migration-smoke /usr/bin/healthcheck.sh
+          # s6-svstat 查询成功不代表服务正在运行，逐个核对三个服务。
+          for service in hbbs hbbr api; do
+            test "$(docker exec migration-smoke /command/s6-svstat -u "/run/service/$service")" = true
+          done
+          version="$(docker exec migration-smoke wget -q -T 3 -O - http://127.0.0.1:21114/api/version)"
+          [[ "$version" == *"migration-${GITHUB_SHA:0:12}"* ]]
+          docker stop --time 10 migration-smoke
+          docker rm -v migration-smoke
+
+      - name: Export fixed test image and build manifest
+        run: |
+          mkdir -p migration-artifact
+          printf '%s\n' "$SERVER_IMAGE" > migration-artifact/image-reference.txt
+          docker image inspect "$SERVER_IMAGE" > migration-artifact/image-inspect.json
+          sha256sum server/target/x86_64-unknown-linux-musl/release/{hbbs,hbbr,rustdesk-utils} amd64/release/apimain \
+            > migration-artifact/binary-sha256.txt
+          cp go.mod migration-artifact/api-go.mod
+          cp go.sum migration-artifact/api-go.sum
+          # 仅导出合并镜像，API 层已包含其中；不保存重复镜像或更新 latest。
+          docker save "$SERVER_IMAGE" | gzip -1 > migration-artifact/image.tar.gz
+          sha256sum migration-artifact/image.tar.gz > migration-artifact/archive-sha256.txt
+
+      - name: Upload migration test image
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-migration-linux-amd64
+          path: migration-artifact/
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error

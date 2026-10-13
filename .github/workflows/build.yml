@@ -24,9 +24,17 @@ on:
         required: false
         default: 'false'
       WEBCLIENT_SOURCE_LOCATION:
-        description: 'Web Client API Repository'
+        description: 'Admin frontend GitHub repository URL or owner/repository'
         required: true
-        default: 'https://github.com/lejianwen/rustdesk-api-web'
+        default: 'https://github.com/yaoguaijiao/rustdesk-api-web'
+      WEBCLIENT_SOURCE_REF:
+        description: 'Admin frontend commit, tag or branch (default: pinned fork commit)'
+        required: true
+        default: '3998c2a9213fcd047252776d0f0db33e6717026c'
+      FULL_S6_SERVER_IMAGE:
+        description: 'Optional: published own server-s6 image with a fixed tag or digest; empty skips Full S6'
+        required: false
+        default: ''
   push:
     tags:
       - 'v*.*.*'  # 当推送带有版本号的 tag（例如 v1.0.0）时触发工作流
@@ -34,7 +42,9 @@ on:
 
 env:
   LATEST_TAG: latest
-  WEBCLIENT_SOURCE_LOCATION: ${{ github.event.inputs.WEBCLIENT_SOURCE_LOCATION || 'https://github.com/lejianwen/rustdesk-api-web' }}
+  WEBCLIENT_SOURCE_LOCATION: ${{ github.event.inputs.WEBCLIENT_SOURCE_LOCATION || 'https://github.com/yaoguaijiao/rustdesk-api-web' }}
+  WEBCLIENT_SOURCE_REF: ${{ github.event.inputs.WEBCLIENT_SOURCE_REF || '3998c2a9213fcd047252776d0f0db33e6717026c' }}
+  FULL_S6_SERVER_IMAGE: ${{ github.event.inputs.FULL_S6_SERVER_IMAGE || '' }}
   BASE_IMAGE_NAMESPACE: ${{ github.event.inputs.BASE_IMAGE_NAMESPACE || github.actor }}
   DOCKERHUB_IMAGE_NAMESPACE: ${{ github.event.inputs.DOCKERHUB_IMAGE_NAMESPACE || github.actor }}
   GHCR_IMAGE_NAMESPACE: ${{ github.event.inputs.GHCR_IMAGE_NAMESPACE || github.actor }}
@@ -53,15 +63,43 @@ jobs:
           - { platform: "armv7l", goos: "linux", file_ext: "tar.gz" }
           - { platform: "amd64", goos: "windows", file_ext: "zip" }
     steps:
+      - name: Validate Full S6 server image
+        if: ${{ env.FULL_S6_SERVER_IMAGE != '' }}
+        shell: bash
+        run: |
+          if [[ "$FULL_S6_SERVER_IMAGE" =~ ^[^[:space:]@]+@sha256:[a-f0-9]{64}$ ]]; then
+            exit 0
+          fi
+          image="${FULL_S6_SERVER_IMAGE##*/}"
+          if [[ "$FULL_S6_SERVER_IMAGE" =~ [[:space:]@] || ! "$image" =~ ^[a-z0-9][a-z0-9._-]*:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ || "${image##*:}" == latest ]]; then
+            echo '::error::FULL_S6_SERVER_IMAGE must use a fixed non-latest tag or sha256 digest'
+            exit 1
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/checkout@v4
+      - name: Resolve admin frontend repository
+        id: frontend
+        shell: bash
+        run: |
+          repository="${WEBCLIENT_SOURCE_LOCATION%/}"
+          repository="${repository#https://github.com/}"
+          repository="${repository#http://github.com/}"
+          repository="${repository%.git}"
+          if [[ ! "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo '::error::WEBCLIENT_SOURCE_LOCATION must be a GitHub URL or owner/repository'
+            exit 1
+          fi
+          printf 'repository=%s\n' "$repository" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned admin frontend
+        uses: actions/checkout@v4
         with:
-          repository: lejianwen/rustdesk-api-web
+          repository: ${{ steps.frontend.outputs.repository }}
           path: rustdesk-api-web
-          ref: master
+          ref: ${{ env.WEBCLIENT_SOURCE_REF }}
 
       - name: Set up Go environment
         uses: actions/setup-go@v4
@@ -304,7 +342,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Build and push Docker Full S6 image to Docker Hub ${{ matrix.job.platform }}
-        if: ${{ env.SKIP_DOCKER_HUB == 'false' }}  # Only run this step if SKIP_DOCKER_HUB is false
+        if: ${{ env.SKIP_DOCKER_HUB == 'false' && env.FULL_S6_SERVER_IMAGE != '' }}
         uses: docker/build-push-action@v5
         with:
           context: "."
@@ -314,6 +352,7 @@ jobs:
           provenance: false
           build-args: |
             BUILDARCH=${{ matrix.job.platform }}
+            FULL_S6_SERVER_IMAGE=${{ env.FULL_S6_SERVER_IMAGE }}
           tags: |
             ${{ env.DOCKERHUB_IMAGE_NAMESPACE }}/rustdesk-api:full-s6-${{ matrix.job.platform }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -335,16 +374,17 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Build and push Docker Full S6 image to GHCR ${{ matrix.job.platform }}
-        if: ${{ env.SKIP_GHCR == 'false' }}  # Only run this step if SKIP_GHCR is false
+        if: ${{ env.SKIP_GHCR == 'false' && env.FULL_S6_SERVER_IMAGE != '' }}
         uses: docker/build-push-action@v5
         with:
           context: "."
-          file: ./Dockerfile
+          file: ./Dockerfile_full_s6
           platforms: ${{ matrix.job.docker_platform }}
           push: true
           provenance: false
           build-args: |
             BUILDARCH=${{ matrix.job.platform }}
+            FULL_S6_SERVER_IMAGE=${{ env.FULL_S6_SERVER_IMAGE }}
           tags: |
             ghcr.io/${{ env.GHCR_IMAGE_NAMESPACE }}/rustdesk-api:full-s6-${{ matrix.job.platform }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -422,7 +462,7 @@ jobs:
           amend: true
 
       - name: Create and push Full S6 manifest Docker Hub (:version)
-        if: ${{ env.SKIP_DOCKER_HUB == 'false' }}
+        if: ${{ env.SKIP_DOCKER_HUB == 'false' && env.FULL_S6_SERVER_IMAGE != '' }}
         uses: Noelware/docker-manifest-action@v0.2.3
         with:
           base-image: ${{ env.BASE_IMAGE_NAMESPACE }}/rustdesk-api:full-s6
@@ -433,7 +473,7 @@ jobs:
           amend: true
 
       - name: Create and push Full S6 manifest GHCR (:latest)
-        if: ${{ env.SKIP_GHCR == 'false' }}
+        if: ${{ env.SKIP_GHCR == 'false' && env.FULL_S6_SERVER_IMAGE != '' }}
         uses: Noelware/docker-manifest-action@v0.2.3
         with:
           base-image: ghcr.io/${{ env.BASE_IMAGE_NAMESPACE }}/rustdesk-api:full-s6

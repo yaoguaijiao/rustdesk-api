@@ -228,6 +228,26 @@
 
 [下载地址](https://github.com/lejianwen/rustdesk-api/releases)
 
+#### 自己的 fork 构建来源
+
+- `Build` 和 `Build Test` 默认使用 `yaoguaijiao/rustdesk-api-web` 的固定提交
+  `3998c2a9213fcd047252776d0f0db33e6717026c`，不会自动跟随原作者的前端更新。
+- 前端改动提交并推送后，把两个工作流中 `WEBCLIENT_SOURCE_REF` 的默认值和 `env`
+  回退值一起更新为新提交 SHA。手动运行工作流时，也可以通过
+  `WEBCLIENT_SOURCE_LOCATION`（GitHub URL 或 `owner/repository`）和
+  `WEBCLIENT_SOURCE_REF` 明确指定其他来源及提交、标签或分支。
+- 普通 API 镜像与可选 Full S6 镜像分开发布。`Build` 的
+  `FULL_S6_SERVER_IMAGE` 留空时，仅发布普通 API；推送标签不会默认构建 Full S6。
+  使用 Full S6 前，必须先发布自己的 `rustdesk-server-s6`，再手动填写该镜像的固定
+  标签或 digest，例如 `ghcr.io/yaoguaijiao/rustdesk-server-s6:<固定版本>`。
+  工作流在下载编译工具之前检查镜像格式，拒绝 `latest`、省略标签和非法 digest。
+- 发布顺序是：普通 API 镜像 → 自己的 server-s6 镜像 → 可选 API Full S6 镜像。
+  server-s6 构建必须引用普通 API 镜像，不能引用 `rustdesk-api:full-s6`，避免循环依赖。
+  输入的 server-s6 镜像还必须支持工作流要求的各 CPU 架构。
+- 本地直接使用 `Dockerfile_full_s6` 时，同样必须传入
+  `--build-arg FULL_S6_SERVER_IMAGE=<自己的固定版本镜像>`；没有默认官方镜像。
+  构建会拉取所需镜像并写入 Docker 层及缓存，请在确实需要验证发布包时执行。
+
 #### 源码安装
 
 1. 克隆仓库
