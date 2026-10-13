@@ -208,6 +208,8 @@ class Engine:
     def compose(self, state, override, action, capture=False):
         # stdin 作为首个 Compose 文件，两种 provider 均按原 cwd 解析相对路径。
         args = self.provider + ["-p", state["project"]]
+        if self.name == "docker":
+            args += ["--project-directory", str(self.cwd)]
         env = Path(state["backup"]) / "dotenv.snapshot"
         if env.exists():
             args += ["--env-file", str(plain(env, False))]
