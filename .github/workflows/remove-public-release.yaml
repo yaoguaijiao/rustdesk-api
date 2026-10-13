@@ -1,0 +1,32 @@
+name: Remove accidental public release
+'on':
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  remove:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Remove only the new public package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 -B - <<'PY'
+          import os,json,urllib.request,urllib.error,time
+          base='https://api.github.com'
+          path='/users/yaoguaijiao/packages/container/rustdesk-server-s6'
+          headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
+          def req(method,path):
+              with urllib.request.urlopen(urllib.request.Request(base+path,headers=headers,method=method),timeout=30) as r:
+                  return json.load(r) if r.status!=204 else None
+          p=req('GET',path)
+          print(json.dumps({k:p.get(k) for k in ('name','visibility','version_count')}))
+          assert p['visibility']=='public' and p['version_count']==1
+          versions=req('GET',path+'/versions')
+          assert len(versions)==1 and versions[0]['name']=='sha256:6a9b1aaea8d6f7fee877fa11da7b440ae29aa57dc9a8e860595a5a83bb6cc146'
+          assert versions[0]['metadata']['container']['tags']==['v2026.10.14.1']
+          req('DELETE',path)
+          print('PASS accidental public package removed')
+          PY
