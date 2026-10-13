@@ -1,6 +1,6 @@
 services:
   rustdesk:
-    image: "${RUSTDESK_IMAGE:-ghcr.io/yaoguaijiao/rustdesk-server-s6:v2026.10.14.1}"
+    image: "${RUSTDESK_IMAGE:-ghcr.io/yaoguaijiao/rustdesk-server-s6-private:v2026.10.14.1}"
     platform: linux/amd64
     container_name: rustdesk-server
     restart: unless-stopped
