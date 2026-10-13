@@ -1,5 +1,7 @@
 # RustDesk API
 
+本人的私有一体镜像使用 `ghcr.io/yaoguaijiao/rustdesk-server-s6-private`，由[私有发布仓库 rustdesk-deploy](https://github.com/yaoguaijiao/rustdesk-deploy)构建。Docker/Podman 部署、保留原密钥和数据库的升级及回滚工具，见[部署说明](deploy/README.md)。下文保留上游项目原说明。
+
 [English Doc](README_EN.md)
 
 本项目使用 Go 实现了 RustDesk 的 API，并包含了 Web Admin 和 Web 客户端。

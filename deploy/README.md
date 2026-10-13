@@ -1,8 +1,8 @@
 # 私有 GHCR 镜像部署
 
-镜像 `ghcr.io/yaoguaijiao/rustdesk-server-s6:v2026.10.14.1` 供本人及明确获授权的账户使用，包保持 **Private**。适用 `linux/amd64`，一个 S6 容器包含 hbbs、hbbr、Go API 和 Vue 管理前端。镜像只包含程序，不包含生产数据库、密钥或账号。
+私有发布目标为 `ghcr.io/yaoguaijiao/rustdesk-server-s6-private:v2026.10.14.1`，供本人及明确获授权的账户使用，包必须保持 **Private**。适用 `linux/amd64`，一个 S6 容器包含 hbbs、hbbr、Go API 和 Vue 管理前端。镜像只包含程序，不包含生产数据库、密钥或账号；具体可用版本和 digest 以私有发布 Actions 的成功结果为准。
 
-使用已有的 Podman + podman-compose，或 Docker Engine + Docker Compose。不需要在部署机器安装项目依赖或编译源码。以下命令在部署机器的私有 Bash 终端、此 `deploy` 目录中执行；一次部署只选择一种容器引擎。
+使用已有的 Podman + **podman-compose 1.5 或更新版本**，或 Docker Engine + Docker Compose。123 服务器现有 podman-compose 为 1.5；升级工具使用的 Compose stdin 方式已在该版本核对。工具只需要 Linux Python 3.9+ 标准库，不需要在部署机器安装项目依赖或编译源码。以下命令在部署机器的私有 Bash 终端、此 `deploy` 目录中执行；一次部署只选择一种容器引擎。
 
 ## 先配置数据和地址
 
@@ -13,7 +13,9 @@ test -e .env || (umask 077; cp .env.example .env)
 
 编辑 `.env`，填写 `PUB_HOST` 和完整的 `PUBLIC_API_URL`。前者派生 ID 服务器 `:21116`、中继 `:21117`；后者允许沿用已有反向代理地址。两项留空时 Compose 会拒绝启动，不依赖嵌套变量插值。
 
-**升级现有服务必须让 `SERVER_DATA_DIR`、`API_DATA_DIR` 指向原两处绝对目录，并保持客户端原地址与公钥。** 123 服务器对应 `/opt/rustdesk/server_data`、`/opt/rustdesk/api_data`。原 `id_ed25519`、`id_ed25519.pub`、`db_v2.sqlite3`、`rustdeskapi.db` 都必须保留；不能清库、删除密钥或用新建空目录替代。先取得一致备份，再核对原环境变量和配置差异；此模板不提供自动迁移或自动回滚。
+**升级现有服务必须沿用原两处绝对数据目录，并保持客户端原地址与公钥。** 123 服务器对应 `/opt/rustdesk/server_data`、`/opt/rustdesk/api_data`。原 `id_ed25519`、`id_ed25519.pub`、`db_v2.sqlite3`、`rustdeskapi.db` 都必须保留；不能清库、删除密钥或用新建空目录替代。模板本身不会自动执行迁移；配套 `upgrade.py` 可以为已支持的现有部署取得停服一致备份、切换镜像和回退旧镜像。
+
+对于已有的 123 服务，使用原 `/opt/rustdesk/docker-compose.yml` 和其同目录现有 `.env`，**不要用新安装模板覆盖原 Compose/.env**。新安装才填写本目录 `.env` 的 `SERVER_DATA_DIR`、`API_DATA_DIR`；既有升级直接从运行容器与原配置核对挂载、端口、网络和项目名。
 
 ```bash
 # 升级前只读检查原四个文件；全部通过后才继续，失败时不能启动到空库。
@@ -86,3 +88,46 @@ docker logs --tail 200 rustdesk-server
 ```
 
 `.env`、authfile、数据库、密钥、备份和日志均留在部署机器，不提交到 Git。后续版本只在验证并备份后更换固定 tag/digest，保留原两处数据目录。
+
+## 升级已有服务及回滚
+
+`upgrade.py` 只支持 Linux 本地 Docker/Podman、现有单个 S6 容器 `rustdesk-server`、两处原 bind 数据卷和已验证的 API schema **265**。123 的原 service 是 `rustdesk`；项目名、原网络和挂载从现有部署读取，原 Compose 和现有 `.env` 会形成私有快照，不改写原配置。原 `MUST_LOGIN=N` 和 JWT 配置保持，免登录远控方式继续生效。
+
+先在部署账户的私有终端完成前述 GHCR 登录，再执行固定版本升级：
+
+```bash
+# 在本 deploy 目录运行：使用原 Compose，先拉取私有固定镜像，拉取完成才停服。
+# 会短暂中断服务；完整复制当时原数据目录（含 WAL/SHM）、配置及密钥到私有备份。
+# 磁盘写入为新增镜像层、约等于数据目录大小的备份和少量日志；不安装、不编译、不清库。
+python3 -B ./upgrade.py upgrade \
+  ghcr.io/yaoguaijiao/rustdesk-server-s6-private:v2026.10.14.1 \
+  --compose /opt/rustdesk/docker-compose.yml --service rustdesk --engine podman
+```
+
+Docker 部署将上述 `--engine podman` 改为 `--engine docker`，使用原 Docker Compose 路径。后续版本把镜像参数替换为已验证的新固定 tag，或直接粘贴 Actions 输出的完整 `ghcr.io/yaoguaijiao/rustdesk-server-s6-private@sha256:...` 引用。重复指定当前相同镜像 ID 时只核对现有健康、密钥和布局，不停服、不重复复制业务数据备份；可能有少量日志与镜像元数据写入。
+
+工具将私有备份目录打印为“升级通过；备份与固定回滚入口：...”，目录位于原 Compose 同级的 `backups` 下。需要回滚时使用**这次工具实际输出的完整目录**，不使用旧手工切换的备份目录：
+
+```bash
+# 只在需要回滚时读取本次实际备份路径；变量只在内存，不复制任何数据库。
+read -r -p '本次升级输出的完整备份目录：' RUSTDESK_UPGRADE_BACKUP
+# 会短暂停服并重建旧镜像容器，沿用当前原卷；只写少量日志和容器元数据，不覆盖原库。
+python3 -B ./upgrade.py rollback --backup "$RUSTDESK_UPGRADE_BACKUP"
+```
+
+升级后会检查三个 S6 服务、API、原密钥、端口/网络/业务环境及原数据库内容；验证失败时会尝试自动切回固定旧镜像，仍使用当前原数据卷。**回滚不恢复旧数据库、不清空数据、不重置密钥**；仅支持 schema 265。若数据库损坏或自动回退未完全通过，保留数据和私有日志供人工处理，不能自动用旧备份覆盖切换后的合法数据。
+
+## 后续版本私有发布
+
+唯一发布入口为[私有仓库 rustdesk-deploy 的 Actions](https://github.com/yaoguaijiao/rustdesk-deploy/actions/workflows/publish-ghcr.yaml)。在 **Publish private RustDesk S6 image → Run workflow** 中选择默认分支，填写：
+
+| 输入 | 要求 |
+| --- | --- |
+| `version` | 新的固定发布版本，例如下一版 `v2026.10.14.2`；同时作为镜像 tag 和 API 显示版本，不能重复已发布 tag |
+| `api_ref` | `yaoguaijiao/rustdesk-api` 已审阅源码的完整 40 位提交 SHA |
+| `server_ref` | `yaoguaijiao/rustdesk-server` 已审阅源码的完整 40 位提交 SHA |
+| `frontend_ref` | `yaoguaijiao/rustdesk-api-web` 已审阅源码的完整 40 位提交 SHA |
+
+三项源码输入不能填写 `master`、`main`、分支名或缩短 SHA；未改动的部分沿用已审阅的固定 SHA。点击 Run workflow 后，依赖下载和前端/Go/Rust 编译只发生在 GitHub CI，用户电脑和生产服务器不参与构建；发布不会自动升级生产服务。
+
+只有工作流成功、包保持 Private、匿名访问被拒绝，且认证 Docker/Podman 拉取及启动验证通过后，才使用该版本。到该次 Actions 的 Summary 获取固定 tag/digest，再按上面的登录和升级步骤使用；不将其他仓库或旧公开构建当作私有发布结果。
