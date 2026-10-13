@@ -2,7 +2,14 @@
 runtime/*
 !runtime
 !runtime/cache/.gitkeep
-go.sum
+# go.sum is tracked to reproduce the verified Linux build.
 resources/admin
 release
 data/rustdeskapi.db
+
+# Local deployment configuration and persistent data.
+.env
+deploy/.env
+deploy/server_data/
+deploy/api_data/
+deploy/backups/
