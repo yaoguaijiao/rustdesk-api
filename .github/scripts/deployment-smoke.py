@@ -6,6 +6,7 @@
 RUNNER_TEMP 子目录，不输出密码、令牌或密钥，不访问生产，不 prune / down -v。
 """
 import importlib.util
+import ast
 import json
 import os
 import re
@@ -17,7 +18,6 @@ import time
 import uuid
 from contextlib import closing
 from pathlib import Path
-import http.client
 
 
 class SmokeError(Exception):
@@ -42,6 +42,28 @@ def load_upgrade(path):
     return module
 
 
+def safe_diagnostics(text, allowed_guards):
+    """只返回源码中固定的守卫字串、异常类或已知参数名，绝不回显任意日志。"""
+    result = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line in allowed_guards:
+            result.append("guard=" + line)
+        elif re.fullmatch(r"Failure class: [A-Za-z][A-Za-z0-9_]{0,63}", line):
+            result.append("failure-class=" + line.split(": ", 1)[1])
+        elif re.fullmatch(r"数据库原静态字段变化：[A-Za-z_][A-Za-z0-9_]{0,63}\.[A-Za-z_][A-Za-z0-9_]{0,63}", line):
+            result.append("guard=" + line)
+        else:
+            # provider 可能在异常 traceback 中回显完整命令；只输出预知的参数名。
+            match = re.search(r"(?:unrecognized arguments|unknown flag|no such option):?\s*(--[a-z-]+)", line, re.I)
+            if match and match[1] in {"--env-file", "--services", "--no-deps", "--no-build", "--force-recreate"}:
+                result.append("cli-unsupported=" + match[1])
+            match = re.match(r"^(FileNotFoundError|PermissionError|KeyError|TypeError|ValueError|JSONDecodeError|TimeoutExpired):", line)
+            if match:
+                result.append("failure-class=" + match[1])
+    return list(dict.fromkeys(result))[-8:]
+
+
 class Fixture:
     def __init__(self, root, source, engine, image, module):
         self.root, self.source, self.engine, self.image, self.up = root, source, engine, image, module
@@ -55,6 +77,15 @@ class Fixture:
         self.token, self.late_token = uuid.uuid4().hex, uuid.uuid4().hex
         self.user = None
         self.keys = None
+        parsed = ast.parse((source / "deploy" / "upgrade.py").read_text(encoding="utf-8"))
+        # 只允许 require(..., 固定字串) 和 GuardError(固定字串)，排除带路径的 print。
+        self.allowed_guards = set()
+        for node in ast.walk(parsed):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                arg = node.args[1] if node.func.id == "require" and len(node.args) > 1 else (
+                    node.args[0] if node.func.id == "GuardError" and node.args else None)
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    self.allowed_guards.add(arg.value)
         self.env = dict(os.environ)
         # CI 外部业务变量不能覆盖这个独立副本；保留 engine auth 和 provider 路径。
         for name in ("PUB_HOST", "PUBLIC_API_URL", "SERVER_DATA_DIR", "API_DATA_DIR",
@@ -174,18 +205,14 @@ class Fixture:
                             "2020-01-01 00:00:00", '{"ip":"127.0.0.1"}'))
 
     def auth(self, late=False):
-        connection = http.client.HTTPConnection("127.0.0.1", 21114, timeout=8)
-        try:
-            connection.request("GET", "/api/user/info", headers={
-                "Authorization": "Bearer " + (self.late_token if late else self.token)})
-            response = connection.getresponse()
-            payload = response.read(65536)
-            require(response.status == 200, "existing-token-http")
-            body = json.loads(payload)
-            require(body.get("name") == self.user[1] and body.get("is_admin") is True,
-                    "existing-token-account")
-        finally:
-            connection.close()
+        self.own()
+        payload = self.run([self.engine, "exec", "rustdesk-server", "wget", "-q", "-T", "8", "-O", "-",
+                            "--header=Authorization: Bearer " + (self.late_token if late else self.token),
+                            "http://127.0.0.1:21114/api/user/info"], capture=True, timeout=15)
+        require(len(payload) <= 65536, "existing-token-response-size")
+        body = json.loads(payload)
+        require(body.get("name") == self.user[1] and body.get("is_admin") is True,
+                "existing-token-account")
 
     def states(self):
         return sorted((self.root / "backups").glob("*/state.json"))
@@ -206,7 +233,23 @@ class Fixture:
                         "rollback-restored-stale-data")
 
     def manager(self, *args, success=True):
+        self.log.flush()
+        offset = self.log.tell()
+        logs = lambda: set((self.root / "backups").glob("*/*.log"))
+        previous = logs()
         rc = self.run([sys.executable, "-B", str(self.source / "deploy" / "upgrade.py")] + list(args), ok=False)
+        if rc != 0:
+            self.log.flush()
+            paths = [(self.root / "smoke.private.log", offset)] + [(p, 0) for p in sorted(logs() - previous)[-2:]]
+            summaries = []
+            for path, start in paths:
+                with path.open("rb") as private:
+                    private.seek(0, os.SEEK_END)
+                    private.seek(max(start, private.tell() - 65536))
+                    summaries.extend(safe_diagnostics(private.read().decode("utf-8", errors="replace"), self.allowed_guards))
+            for summary in list(dict.fromkeys(summaries))[-8:]:
+                print("DIAG " + summary, flush=True)
+            print("DIAG manager-exit=" + str(rc), flush=True)
         require((rc == 0) == success, "upgrade-command-result")
 
     def upgrade(self, image, success=True):

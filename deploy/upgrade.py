@@ -299,9 +299,9 @@ def deployment(container, service, engine, allow_stopped=False):
 
 def override(backup, service, image, label):
     path = Path(backup) / (label + ".override.json")
-    save(path, {"services": {service: {"image": image, "pull_policy": "never", "healthcheck": {
-        "test": ["CMD-SHELL", HEALTH.replace("$", "$$")], "interval": "10s", "timeout": "8s",
-        "start_period": "20s", "retries": 3}}}})
+    # Podman Compose 1.5 合并 healthcheck.test 数组会追加而不是替换；保留原健康配置。
+    # 升级结果仍由 Engine.healthy 的三个 S6 服务 + API 检查独立确认。
+    save(path, {"services": {service: {"image": image, "pull_policy": "never"}}})
     return path
 
 

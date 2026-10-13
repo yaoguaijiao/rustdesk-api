@@ -1,5 +1,7 @@
 # 私有 GHCR 镜像部署
 
+首版[私有发布验证已通过](https://github.com/yaoguaijiao/rustdesk-deploy/actions/runs/38441493511)：包为 Private，匿名拉取被拒绝，Docker/Podman 授权拉取及隔离启动通过。固定 digest 为 `sha256:858f8d374c8e72d2cfb41cea6a47999e90db50a675a5e9730f46ff28039528cc`；完整发布记录保存在私有仓库的 `release-v2026.10.14.1.json`。生产服务不会随发布自动切换。
+
 私有发布目标为 `ghcr.io/yaoguaijiao/rustdesk-server-s6-private:v2026.10.14.1`，供本人及明确获授权的账户使用，包必须保持 **Private**。适用 `linux/amd64`，一个 S6 容器包含 hbbs、hbbr、Go API 和 Vue 管理前端。镜像只包含程序，不包含生产数据库、密钥或账号；具体可用版本和 digest 以私有发布 Actions 的成功结果为准。
 
 使用已有的 Podman + **podman-compose 1.5 或更新版本**，或 Docker Engine + Docker Compose。123 服务器现有 podman-compose 为 1.5；升级工具使用的 Compose stdin 方式已在该版本核对。工具只需要 Linux Python 3.9+ 标准库，不需要在部署机器安装项目依赖或编译源码。以下命令在部署机器的私有 Bash 终端、此 `deploy` 目录中执行；一次部署只选择一种容器引擎。
@@ -38,13 +40,17 @@ set +x
 read -r -p 'GitHub 用户名：' GHCR_USER
 read -r -s -p '只读 GHCR Token：' GHCR_PULL_PAT
 printf '\n'
-# Podman 登录会在当前部署账户的本机 authfile 保存少量凭据；不拉取镜像。
-printf '%s' "$GHCR_PULL_PAT" | podman login ghcr.io --username "$GHCR_USER" --password-stdin
+# 只为部署账户创建私有配置目录，写入量极小；保存凭据以便服务器重启后复用。
+(umask 077; mkdir -p "$HOME/.config/containers")
+# 变量只保存 authfile 路径；PAT 不进入 .env 或源码。
+export REGISTRY_AUTH_FILE="$HOME/.config/containers/rustdesk-ghcr-auth.json"
+# 登录只写少量凭据到这个专用 authfile，不拉取镜像。
+printf '%s' "$GHCR_PULL_PAT" | podman login --authfile "$REGISTRY_AUTH_FILE" ghcr.io --username "$GHCR_USER" --password-stdin
 # 清除 shell 中的 PAT，不打印内容；凭据仍由 Podman 的 authfile 管理。
 unset GHCR_PULL_PAT
 ```
 
-Podman 默认 Linux authfile 位于运行时目录，重启后可能需要重新登录；凭据是编码保存，不是加密保险箱，文件只应由部署账户访问，不能上传。后续 pull 使用同一部署账户。[Podman 官方登录说明](https://docs.podman.io/en/latest/markdown/podman-login.1.html)
+这里使用持久的专用 authfile，避免默认运行时凭据在重启后丢失。以后换终端时重新设置同一个 `REGISTRY_AUTH_FILE` 路径即可，无需反复输入未到期的 PAT。凭据是编码保存，文件只应由部署账户访问，不能上传。后续 pull 使用同一部署账户。[Podman 官方登录说明](https://docs.podman.io/en/latest/markdown/podman-login.1.html)
 
 Docker 用户在上面同一交互流程中，把登录命令替换为下列命令，然后同样清除变量：
 
@@ -60,6 +66,8 @@ unset GHCR_PULL_PAT
 以下启动命令用于配置已核对的新安装。已有生产容器升级前，应先完成备份、端口/项目/原挂载核对及切换安排，不能与旧容器同时占用同一数据卷和端口。
 
 ```bash
+# 新终端复用已有私有凭据：只设置路径到内存，不重写文件。
+export REGISTRY_AUTH_FILE="$HOME/.config/containers/rustdesk-ghcr-auth.json"
 # Podman：只拉取指定固定版本，写入服务器镜像存储；已有层会复用，不编译。
 podman-compose -p rustdesk -f compose.yaml --env-file .env pull
 # 启动一体容器；会创建容器/bridge 网络，首次安装会写密钥、数据库及日志。
@@ -96,6 +104,8 @@ docker logs --tail 200 rustdesk-server
 先在部署账户的私有终端完成前述 GHCR 登录，再执行固定版本升级：
 
 ```bash
+# 复用部署账户的专用 authfile；只设置内存变量，不重新登录或写凭据。
+export REGISTRY_AUTH_FILE="$HOME/.config/containers/rustdesk-ghcr-auth.json"
 # 在本 deploy 目录运行：使用原 Compose，先拉取私有固定镜像，拉取完成才停服。
 # 会短暂中断服务；完整复制当时原数据目录（含 WAL/SHM）、配置及密钥到私有备份。
 # 磁盘写入为新增镜像层、约等于数据目录大小的备份和少量日志；不安装、不编译、不清库。
